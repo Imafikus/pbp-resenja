@@ -1,0 +1,173 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+EXEC SQL INCLUDE SQLCA;
+
+EXEC SQL BEGIN DECLARE SECTION;
+char stmt[100];
+
+sqlint32 indeks;
+char ime[26];
+char prezime[26];
+short bodovi;
+float poeni_studije;
+EXEC SQL END DECLARE SECTION;
+
+void proveri_gresku(const char *msg) {
+    if (SQLCODE < 0) {
+        fprintf(stderr, "Greska! SQLCODE = %d; message = %s\n", SQLCODE, msg);
+        EXEC SQL ROLLBACK;
+        exit(EXIT_FAILURE);
+    }
+}
+
+void obradi_cekanje_van_kursora(const char *codeHint);
+void obradi_cekanje_unutar_kursora(const char *codeHint);
+
+int main() {
+    EXEC SQL CONNECT TO stud2020 USER student USING abcdef;
+    proveri_gresku("CONNECT TO");
+
+    EXEC SQL 
+        SET CURRENT LOCK TIMEOUT 5;
+    proveri_gresku("LOCK 5");
+    
+    printf("Da li zelite da obrisete podatke o kandidatima za polaganje testa? [d/n]\n");
+    char odgovor = getchar();
+    getchar(); // novi red 
+
+    if ('d' == odgovor) {
+        printf("Pripremam tabelu za rad...\n");
+        sprintf(stmt, "DELETE FROM DA.PRAKSA");
+
+        for(;;) {
+            EXEC SQL 
+                EXECUTE IMMEDIATE :stmt;
+            if (SQLCODE == -911 || SQLCODE == -913) {
+                obradi_cekanje_van_kursora("DELETE");
+                continue;
+            }
+            proveri_gresku("DELETE");
+
+            printf("Svi podaci su uspesno obrisani!\n");
+            break;
+        }
+    }
+    else {
+        printf("Prethodni podaci nisu obrisani\n");
+    }
+
+    EXEC SQL 
+        DECLARE kursor CURSOR WITH HOLD FOR 
+        WITH POLOZENO_BODOVA_I_PROSEK AS (
+            SELECT      INDEKS, 
+                        COUNT(P.ESPB) AS POLOZENO,
+                        AVG(REAL(OCENA)) AS PROSEK
+            FROM        DA.ISPIT AS I JOIN
+                        DA.PREDMET AS P ON I.IDPREDMETA = P.ID
+            WHERE       OCENA > 5 AND
+                        STATUS = 'o'
+            GROUP BY    INDEKS
+        )
+        SELECT      D.INDEKS,
+                    TRIM(IME),
+                    TRIM(PREZIME),
+                    SP.OBIMESPB - PBIP.POLOZENO AS PREOSTALO_BODOVA,
+                    PBIP.PROSEK * 10 AS POENI_STUDIJE
+        FROM        DA.DOSIJE AS D JOIN
+                    DA.STUDIJSKIPROGRAM AS SP ON D.IDPROGRAMA = SP.ID JOIN
+                    POLOZENO_BODOVA_I_PROSEK AS PBIP ON D.INDEKS = PBIP.INDEKS
+        WHERE       SP.OBIMESPB - PBIP.POLOZENO BETWEEN 0 AND 60 AND
+                    D.INDEKS NOT IN (
+                        SELECT  INDEKS
+                        FROM    DA.PRAKSA
+                    )
+        ORDER BY    PREOSTALO_BODOVA ASC
+        WITH        RS;
+    proveri_gresku("DECLARE");
+
+    EXEC SQL 
+        OPEN kursor;
+    proveri_gresku("OPEN");
+
+    unsigned redniBroj = 1u;
+
+    for (;;) {
+        EXEC SQL
+            FETCH   kursor 
+            INTO    :indeks,
+                    :ime,
+                    :prezime,
+                    :bodovi,
+                    :poeni_studije;
+        if (SQLCODE == -911 || SQLCODE == -913) {
+            obradi_cekanje_unutar_kursora("FETCH");
+            continue;
+        }
+        proveri_gresku("FETCH");
+
+        printf("=======================================================\n");
+        printf("%3d. kandidat: %s %s (%d) - preostalo ESPB: %hd\n", redniBroj, ime, prezime, indeks, bodovi);
+        printf("Da li zelite da prijavite kandidata za polaganje testa za praksu? [d/n]\n");
+
+        odgovor = getchar();
+        getchar(); // novi red 
+
+        if ('d' == odgovor) {
+            EXEC SQL
+                INSERT  INTO DA.PRAKSA
+                VALUES  (:indeks, :poeni_studije, -1);
+            if (SQLCODE == -911 || SQLCODE == -913) {
+                obradi_cekanje_unutar_kursora("INSERT");
+                continue;
+            }
+            proveri_gresku("INSERT");
+
+            printf("Uspesno ste prijavili kandidata!\n");
+        }
+
+        EXEC SQL COMMIT;
+        proveri_gresku("COMMIT - kraj transakcije");
+
+        ++redniBroj;
+
+        // Radi brzeg zavrsavanja aplikacije
+        if (redniBroj > 10u) {
+            break;
+        }
+    }
+
+    EXEC SQL 
+        CLOSE kursor;
+    proveri_gresku("CLOSE");
+
+    EXEC SQL 
+        SET CURRENT LOCK TIMEOUT NULL;
+    proveri_gresku("LOCK NULL");
+    
+    EXEC SQL COMMIT;
+    proveri_gresku("COMMIT - kraj programa");
+    
+    EXEC SQL CONNECT RESET;
+    proveri_gresku("CONNECT RESET");
+    
+    return 0;
+}
+
+void obradi_cekanje_van_kursora(const char *codeHint) {
+    printf("[%s] Objekat je zakljucan!\n", codeHint);
+
+    EXEC SQL ROLLBACK;
+    proveri_gresku("ROLLBACK - obradi_cekanje_van_kursora");
+}
+
+void obradi_cekanje_unutar_kursora(const char *codeHint) {
+    printf("[%s] Objekat je zakljucan!\n", codeHint);
+
+    EXEC SQL ROLLBACK;
+    proveri_gresku("ROLLBACK - obradi_cekanje_unutar_kursora");
+
+    EXEC SQL OPEN kursor;
+    proveri_gresku("OPEN - obradi_cekanje_unutar_kursora");
+}
